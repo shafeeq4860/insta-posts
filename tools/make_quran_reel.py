@@ -23,6 +23,15 @@ def font(path, size):
     try: return ImageFont.truetype(path, size, layout_engine=ImageFont.Layout.RAQM)
     except Exception: return ImageFont.truetype(path, size)
 
+def wrap(dr, text, f, maxw):
+    out, cur = [], ""
+    for w in text.split():
+        t = (cur + " " + w).strip()
+        if not cur or dr.textlength(t, font=f, direction="rtl") <= maxw: cur = t
+        else: out.append(cur); cur = w
+    if cur: out.append(cur)
+    return out
+
 def ridge(seed, base, amp, n=W):
     rng = np.random.default_rng(seed)
     x = np.linspace(0, 1, n)
@@ -79,8 +88,13 @@ def main(src, out):
     birds = [(rng.uniform(-300, -50), rng.uniform(250, horizon - 400), rng.uniform(55, 80), rng.random() * 6.28)
              for _ in range(5)]
     af = font(AR, 92); rf = font(INTER % "SemiBold", 34); hf = font(INTER % "Bold", 34)
-    lines = d["lines"]
-    seg = (secs - 1.5) / len(lines)
+    lines = d.get("lines") or []
+    segs = d.get("segments")
+    seg = (secs - 1.5) / max(1, len(lines))
+    if segs: af = font(AR, int(d.get("ar_size", 76)))
+    shade = Image.new("RGBA", (W, H), (0, 0, 0, 0)); sd = ImageDraw.Draw(shade)
+    sd.rectangle([0, 300, W, 820], fill=(0, 0, 0, 80))
+    shade = shade.filter(ImageFilter.GaussianBlur(60))
     tmp = tempfile.mkdtemp()
     n = int(secs * FPS)
     for i in range(n):
@@ -104,22 +118,34 @@ def main(src, out):
                 dr.line([(xx, yk), (xx + 4, yk)], width=3,
                         fill=tuple(int(p * (1 - al) + c * al) for p, c in zip(px, sun)))
         for (bx, by, sp, ph) in birds:
-            x = bx + sp * t; y = by + 12 * math.sin(t * 0.8 + ph)
+            x = (bx + sp * t + 300) % (W + 400) - 300; y = by + 12 * math.sin(t * 0.8 + ph)
             f = 10 * math.sin(t * 6 + ph)
             dr.line([(x - 18, y - f), (x, y), (x + 18, y - f)], fill=(30, 20, 35), width=4)
-        # text: darken band + current line fade
-        k = min(int(t / seg), len(lines) - 1)
-        lt = t - k * seg
-        a = min(1, lt / 0.8) * (1 if k == len(lines) - 1 or lt < seg - 0.6 else max(0, (seg - lt) / 0.6))
-        shade = Image.new("RGBA", (W, H), (0, 0, 0, 0)); sd = ImageDraw.Draw(shade)
-        sd.rectangle([0, 560, W, 1000], fill=(0, 0, 0, 70))
-        fr = Image.alpha_composite(fr.convert("RGBA"), shade.filter(ImageFilter.GaussianBlur(60)))
+        # text: current line/segment with fade in/out
+        if segs:
+            k = 0
+            for j, sg in enumerate(segs):
+                if t >= sg["start"] - 0.2: k = j
+            st = segs[k]["start"] - 0.2
+            en = segs[k + 1]["start"] - 0.2 if k + 1 < len(segs) else secs + 1
+            lt = t - st
+            a = max(0.0, min(1, lt / 0.5, (en - t) / 0.35)) if t >= st else 0.0
+            words = segs[k]["text"]
+        else:
+            k = min(int(t / seg), len(lines) - 1)
+            lt = t - k * seg
+            a = min(1, lt / 0.8) * (1 if k == len(lines) - 1 or lt < seg - 0.6 else max(0, (seg - lt) / 0.6))
+            words = lines[k]
+        fr = Image.alpha_composite(fr.convert("RGBA"), shade)
         txt = Image.new("RGBA", (W, H), (0, 0, 0, 0)); td = ImageDraw.Draw(txt)
-        words = lines[k]
-        td.text((W / 2 + 3, 783), words, font=af, fill=(0, 0, 0, int(140 * a)), anchor="mm", direction="rtl")
-        td.text((W / 2, 780), words, font=af, fill=(255, 246, 222, int(255 * a)), anchor="mm", direction="rtl")
+        wl = wrap(td, words, af, 940)
+        lh = int(af.size * 1.9); y0 = 560 - lh * (len(wl) - 1) / 2
+        for m, ln in enumerate(wl):
+            y = y0 + m * lh
+            td.text((W / 2 + 3, y + 3), ln, font=af, fill=(0, 0, 0, int(140 * a)), anchor="mm", direction="rtl")
+            td.text((W / 2, y), ln, font=af, fill=(255, 246, 222, int(255 * a)), anchor="mm", direction="rtl")
         ra = min(1, t / 1.5)
-        td.text((W / 2, 930), d["reference"], font=rf, fill=(255, 230, 190, int(220 * ra)), anchor="mm")
+        td.text((W / 2, 1110), d["reference"], font=rf, fill=(255, 230, 190, int(220 * ra)), anchor="mm")
         td.text((W / 2, H - 140), d["handle"], font=hf, fill=(255, 230, 190, int(230 * ra)), anchor="mm")
         fr = Image.alpha_composite(fr, txt).convert("RGB")
         fr.save(os.path.join(tmp, f"{i:05d}.jpg"), quality=90)
